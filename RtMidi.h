@@ -597,7 +597,10 @@ class RTMIDI_DLL_PUBLIC MidiInApi : public MidiApi
       : bytes(0), timeStamp(0.0) {}
   };
 
-  struct MidiQueue {
+  // Exported explicitly: a class-level dllexport on MidiInApi does not
+  // propagate to nested types, so the queue methods would otherwise be
+  // missing from the Windows import library (e.g. for the unit tests).
+  struct RTMIDI_DLL_PUBLIC MidiQueue {
     // front/back are accessed concurrently by the MIDI input thread
     // (producer, via push) and the user thread (consumer, via pop), so
     // they must be atomic to avoid a data race.  This is a single-
