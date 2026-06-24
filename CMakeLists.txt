@@ -258,6 +258,10 @@ if (RTMIDI_BUILD_TESTING)
   add_test(NAME queuestress COMMAND queuestress)
   add_test(NAME midiparse COMMAND midiparse)
   add_test(NAME testc_hardening COMMAND testc_hardening)
+  # Bound each test so a hang (e.g. a queue spin-wait starving on an
+  # oversubscribed runner) fails fast instead of stalling the whole job.
+  set_tests_properties(apinames queuestress midiparse testc_hardening
+    PROPERTIES TIMEOUT 120)
 endif()
 
 # Set standard installation directories.

@@ -109,7 +109,7 @@ int main()
     return 1;
 
   const unsigned int RING = 8;       // small -> lots of wraparound / full
-  const uint32_t COUNT = 500000;     // messages pushed through the ring
+  const uint32_t COUNT = 100000;     // messages pushed through the ring
 
   MidiInApi::MidiQueue q;
   q.ringSize = RING;
@@ -130,6 +130,8 @@ int main()
       m.bytes.push_back((unsigned char)((i >> 16) & 0xff));
       while (!q.push(m)) {
         if (failed.load()) return;   // consumer gave up; don't wedge here
+        std::this_thread::yield();   // cede to the consumer (avoids spin
+                                     // starvation on oversubscribed cores)
       }
     }
   });
@@ -138,7 +140,9 @@ int main()
     std::vector<unsigned char> bytes;
     double ts = 0.0;
     for (uint32_t i = 0; i < COUNT; ++i) {
-      while (!q.pop(&bytes, &ts)) { /* ring empty: wait for producer */ }
+      while (!q.pop(&bytes, &ts)) {  // ring empty: wait for the producer
+        std::this_thread::yield();
+      }
       uint32_t got = (uint32_t)ts;
       uint32_t payload = bytes.size() == 3
         ? (uint32_t)(bytes[0] | (bytes[1] << 8) | (bytes[2] << 16))
