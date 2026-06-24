@@ -1427,9 +1427,15 @@ CFStringRef CreateEndpointName( MIDIEndpointRef endpoint, bool isExternal )
   str = NULL;
   MIDIObjectGetStringProperty( device, kMIDIPropertyName, &str );
   if ( CFStringGetLength( result ) == 0 ) {
-      CFRelease( result );
-      CFRetain( str );
-      return str;
+      // The endpoint has no name of its own; fall back to the device name.
+      // If that property fetch failed, str is NULL -- CFRetain(NULL) would
+      // crash, so keep the (empty) endpoint name in that case.
+      if ( str != NULL ) {
+        CFRelease( result );
+        CFRetain( str );
+        return str;
+      }
+      return result;
   }
   if ( str != NULL ) {
     // if an external device has only one entity, throw away
@@ -1522,7 +1528,7 @@ std::string MidiInCore :: getPortName( unsigned int portNumber )
 {
   CFStringRef nameRef;
   MIDIEndpointRef portRef;
-  char name[128];
+  char name[128] = "";  // stays a valid empty string if the conversion fails
 
   std::string stringName;
   CFRunLoopRunInMode( kCFRunLoopDefaultMode, 0, false );
@@ -1609,7 +1615,7 @@ std::string MidiOutCore :: getPortName( unsigned int portNumber )
 {
   CFStringRef nameRef;
   MIDIEndpointRef portRef;
-  char name[128];
+  char name[128] = "";  // stays a valid empty string if the conversion fails
 
   std::string stringName;
   CFRunLoopRunInMode( kCFRunLoopDefaultMode, 0, false );
@@ -2576,7 +2582,6 @@ void MidiOutAlsa :: openPort( unsigned int portNumber, const std::string &portNa
 
   // Make subscription
   if ( snd_seq_port_subscribe_malloc( &data->subscription ) < 0 ) {
-    snd_seq_port_subscribe_free( data->subscription );
     errorString_ = "MidiOutAlsa::openPort: error allocating port subscription.";
     error( RtMidiError::DRIVER_ERROR, errorString_ );
     return;
@@ -2828,6 +2833,13 @@ static void CALLBACK midiInputCallback( HMIDIIN /*hmin*/,
     // buffer when an application closes and in this case, we should
     // avoid requeueing it, else the computer suddenly reboots after
     // one or two minutes.
+    //
+    // dwUser carries the index of one of our prepared buffers; validate it
+    // before indexing rather than trusting the driver-supplied header, since
+    // an out-of-range value would be an out-of-bounds read and an arbitrary
+    // pointer dereference.
+    if ( sysex->dwUser >= apiData->sysexBuffer.size() )
+      return;
     if ( apiData->sysexBuffer[sysex->dwUser]->dwBytesRecorded > 0 ) {
       //if ( sysex->dwBytesRecorded > 0 ) {
       EnterCriticalSection( &(apiData->_mutex) );
@@ -4478,7 +4490,13 @@ std::string MidiOutJack :: getPortName( unsigned int portNumber )
     return retStr;
   }
 
-  if ( ports[portNumber] == NULL ) {
+  // jack_get_ports returns a NULL-terminated array; count its entries
+  // before indexing so a large portNumber can't read past the terminator.
+  unsigned int count = 0;
+  while ( ports[count] != NULL )
+    count++;
+
+  if ( portNumber >= count ) {
     std::ostringstream ost;
     ost << "MidiOutJack::getPortName: the 'portNumber' argument (" << portNumber << ") is invalid.";
     errorString_ = ost.str();

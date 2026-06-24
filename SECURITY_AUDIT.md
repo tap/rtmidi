@@ -5,6 +5,24 @@
 **Commit:** `a3233c2`
 **Date:** 2026-06-24
 
+## Resolution status
+
+Fixes have landed in two rounds. **Round 1** (merged via PR #1): the MidiQueue
+data race, the shared input parser + zero-length-event OOB (JACK/Android), the
+queue-sizing crash, the duplicate Web MIDI API entry, and the C-wrapper
+hardening — plus the test suite and CI expansion. **Round 2** (this branch):
+the remaining backend-specific guards below — ALSA free-of-garbage subscription,
+JACK `MidiOutJack::getPortName` OOB, WinMM `sysex->dwUser` bounds, CoreMIDI
+`CFRetain(NULL)` and uninitialized name buffers.
+
+**Still open:** the JACK `closePort` port-handle teardown race. On review the
+destructor is already safe (`jack_client_close` quiesces the realtime callback
+before `delete data`); the residual is a narrow race in `closePort`, and the
+correct fix (deactivate-on-close / reactivate-on-open) alters the hot path for
+all JACK users and cannot be runtime-verified here (CI runs no JACK server), so
+it is deferred rather than shipped unverified. Also open: WinMM `MIDIHDR` /
+critical-section leaks on error paths, and the WinUWP callback-lifetime races.
+
 ## Summary
 
 RtMidi is a mature, widely used realtime MIDI I/O library with a clean public API
