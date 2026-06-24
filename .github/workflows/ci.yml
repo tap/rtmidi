@@ -196,8 +196,10 @@ jobs:
   # Universal Windows Platform (C++/WinRT) backend. There is no CMake support
   # for it, so compile directly with MSVC: locate Visual Studio with vswhere,
   # generate the C++/WinRT projection headers from the installed Windows SDK
-  # with cppwinrt, then compile the __WINDOWS_UWP__ translation unit
-  # (C++17 + coroutines). Compile-only smoke test.
+  # with cppwinrt, then compile the __WINDOWS_UWP__ translation unit. Build as
+  # C++20 so the standard <coroutine> support is used (the older /await with
+  # <experimental/coroutine> is now a hard error in current MSVC). Compile-only
+  # smoke test.
   WinUWP:
     runs-on: windows-latest
     steps:
@@ -210,4 +212,4 @@ jobs:
         for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set "VSPATH=%%i"
         call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
         cppwinrt -input sdk -output "%RUNNER_TEMP%\winrt" || exit /b 1
-        cl /nologo /std:c++17 /EHsc /await /permissive- /D__WINDOWS_UWP__ /I. /I"%RUNNER_TEMP%\winrt" /c RtMidi.cpp /Fo"%RUNNER_TEMP%\RtMidi.obj" || exit /b 1
+        cl /nologo /std:c++20 /EHsc /permissive- /D__WINDOWS_UWP__ /I. /I"%RUNNER_TEMP%\winrt" /c RtMidi.cpp /Fo"%RUNNER_TEMP%\RtMidi.obj" || exit /b 1
