@@ -98,25 +98,32 @@ enum RtMidiApi rtmidi_compiled_api_by_name(const char *name) {
 
 void rtmidi_open_port (RtMidiPtr device, unsigned int portNumber, const char *portName)
 {
-    std::string name = portName;
+    // portName is documented as optional; std::string(nullptr) is undefined.
+    std::string name = portName ? portName : "";
     try {
         ((RtMidi*) device->ptr)->openPort (portNumber, name);
 
     } catch (const RtMidiError & err) {
         device->ok  = false;
         rtmidi_set_error_msg (device, err.what ());
+    } catch (...) {
+        device->ok  = false;
+        rtmidi_set_error_msg (device, "Unknown error");
     }
 }
 
 void rtmidi_open_virtual_port (RtMidiPtr device, const char *portName)
 {
-    std::string name = portName;
+    std::string name = portName ? portName : "";
     try {
         ((RtMidi*) device->ptr)->openVirtualPort (name);
 
     } catch (const RtMidiError & err) {
         device->ok  = false;
         rtmidi_set_error_msg (device, err.what ());
+    } catch (...) {
+        device->ok  = false;
+        rtmidi_set_error_msg (device, "Unknown error");
     }
 
 }
@@ -129,6 +136,9 @@ void rtmidi_close_port (RtMidiPtr device)
     } catch (const RtMidiError & err) {
         device->ok  = false;
         rtmidi_set_error_msg (device, err.what ());
+    } catch (...) {
+        device->ok  = false;
+        rtmidi_set_error_msg (device, "Unknown error");
     }
 }
 
@@ -141,12 +151,19 @@ unsigned int rtmidi_get_port_count (RtMidiPtr device)
         device->ok  = false;
         rtmidi_set_error_msg (device, err.what ());
         return -1;
+    } catch (...) {
+        device->ok  = false;
+        rtmidi_set_error_msg (device, "Unknown error");
+        return -1;
     }
 }
 
 int rtmidi_get_port_name (RtMidiPtr device, unsigned int portNumber, char * bufOut, int * bufLen)
 {
-    if (bufOut == nullptr && bufLen == nullptr) {
+    // bufLen is needed in both modes: to report the required size when bufOut
+    // is null, and to bound the copy when it is not. Dereferencing a null
+    // bufLen below would crash, so require it.
+    if (bufLen == nullptr) {
         return -1;
     }
 
@@ -156,6 +173,10 @@ int rtmidi_get_port_name (RtMidiPtr device, unsigned int portNumber, char * bufO
     } catch (const RtMidiError & err) {
         device->ok  = false;
         rtmidi_set_error_msg (device, err.what ());
+        return -1;
+    } catch (...) {
+        device->ok  = false;
+        rtmidi_set_error_msg (device, "Unknown error");
         return -1;
     }
 
@@ -187,6 +208,12 @@ RtMidiInPtr rtmidi_in_create_default ()
         wrp->error_callback_proxy = 0;
         wrp->ok  = false;
         rtmidi_set_error_msg (wrp, err.what ());
+    } catch (...) {
+        wrp->ptr = 0;
+        wrp->callback_proxy = 0;
+        wrp->error_callback_proxy = 0;
+        wrp->ok  = false;
+        rtmidi_set_error_msg (wrp, "Unknown error");
     }
 
     return wrp;
@@ -194,7 +221,7 @@ RtMidiInPtr rtmidi_in_create_default ()
 
 RtMidiInPtr rtmidi_in_create (enum RtMidiApi api, const char *clientName, unsigned int queueSizeLimit)
 {
-    std::string name = clientName;
+    std::string name = clientName ? clientName : "";
     RtMidiWrapper* wrp = new RtMidiWrapper{};
 
     try {
@@ -212,6 +239,12 @@ RtMidiInPtr rtmidi_in_create (enum RtMidiApi api, const char *clientName, unsign
         wrp->error_callback_proxy = 0;
         wrp->ok  = false;
         rtmidi_set_error_msg (wrp, err.what ());
+    } catch (...) {
+        wrp->ptr = 0;
+        wrp->callback_proxy = 0;
+        wrp->error_callback_proxy = 0;
+        wrp->ok  = false;
+        rtmidi_set_error_msg (wrp, "Unknown error");
     }
 
     return wrp;
@@ -239,6 +272,11 @@ enum RtMidiApi rtmidi_in_get_current_api (RtMidiPtr device)
         rtmidi_set_error_msg (device, err.what ());
 
         return RTMIDI_API_UNSPECIFIED;
+    } catch (...) {
+        device->ok  = false;
+        rtmidi_set_error_msg (device, "Unknown error");
+
+        return RTMIDI_API_UNSPECIFIED;
     }
 }
 
@@ -246,24 +284,35 @@ static
 void callback_proxy (double timeStamp, std::vector<unsigned char> *message, void *userData)
 {
   CallbackProxyUserData<RtMidiCCallback>* proxy = reinterpret_cast<CallbackProxyUserData<RtMidiCCallback>*> (userData);
-  proxy->c_callback (timeStamp, message->data (), message->size (), proxy->user_data);
+  // This runs on RtMidi's internal MIDI thread; an exception escaping the
+  // user's C callback into RtMidi (C++) would be undefined behavior.
+  try {
+    proxy->c_callback (timeStamp, message->data (), message->size (), proxy->user_data);
+  } catch (...) {}
 }
 
 static
 void error_callback_proxy (RtMidiError::Type type, const std::string &errorText, void *userData)
 {
   CallbackProxyUserData<RtMidiErrorCCallback>* proxy = reinterpret_cast<CallbackProxyUserData<RtMidiErrorCCallback>*> (userData);
-  proxy->c_callback (static_cast<RtMidiErrorType>(type), errorText.c_str (), proxy->user_data);
+  try {
+    proxy->c_callback (static_cast<RtMidiErrorType>(type), errorText.c_str (), proxy->user_data);
+  } catch (...) {}
 }
 
 void rtmidi_in_set_callback (RtMidiInPtr device, RtMidiCCallback callback, void *userData)
 {
-    device->callback_proxy = (void*) new CallbackProxyUserData<RtMidiCCallback> (callback, userData);
     try {
+        device->callback_proxy = (void*) new CallbackProxyUserData<RtMidiCCallback> (callback, userData);
         ((RtMidiIn*) device->ptr)->setCallback (callback_proxy, device->callback_proxy);
     } catch (const RtMidiError & err) {
         device->ok  = false;
         rtmidi_set_error_msg (device, err.what ());
+        delete (CallbackProxyUserData<RtMidiCCallback>*) device->callback_proxy;
+        device->callback_proxy = 0;
+    } catch (...) {
+        device->ok  = false;
+        rtmidi_set_error_msg (device, "Unknown error");
         delete (CallbackProxyUserData<RtMidiCCallback>*) device->callback_proxy;
         device->callback_proxy = 0;
     }
@@ -278,17 +327,25 @@ void rtmidi_in_cancel_callback (RtMidiInPtr device)
     } catch (const RtMidiError & err) {
         device->ok  = false;
         rtmidi_set_error_msg (device, err.what ());
+    } catch (...) {
+        device->ok  = false;
+        rtmidi_set_error_msg (device, "Unknown error");
     }
 }
 
 void rtmidi_set_error_callback (RtMidiOutPtr device, RtMidiErrorCCallback callback, void *userData)
 {
-    device->error_callback_proxy = (void*) new CallbackProxyUserData<RtMidiErrorCCallback> (callback, userData);
     try {
+        device->error_callback_proxy = (void*) new CallbackProxyUserData<RtMidiErrorCCallback> (callback, userData);
         ((RtMidi*) device->ptr)->setErrorCallback (error_callback_proxy, device->error_callback_proxy);
     } catch (const RtMidiError & err) {
         device->ok  = false;
         rtmidi_set_error_msg (device, err.what ());
+        delete (CallbackProxyUserData<RtMidiErrorCCallback>*) device->error_callback_proxy;
+        device->error_callback_proxy = 0;
+    } catch (...) {
+        device->ok  = false;
+        rtmidi_set_error_msg (device, "Unknown error");
         delete (CallbackProxyUserData<RtMidiErrorCCallback>*) device->error_callback_proxy;
         device->error_callback_proxy = 0;
     }
@@ -296,7 +353,12 @@ void rtmidi_set_error_callback (RtMidiOutPtr device, RtMidiErrorCCallback callba
 
 void rtmidi_in_ignore_types (RtMidiInPtr device, bool midiSysex, bool midiTime, bool midiSense)
 {
-  ((RtMidiIn*) device->ptr)->ignoreTypes (midiSysex, midiTime, midiSense);
+  try {
+    ((RtMidiIn*) device->ptr)->ignoreTypes (midiSysex, midiTime, midiSense);
+  } catch (...) {
+    device->ok = false;
+    rtmidi_set_error_msg (device, "Unknown error");
+  }
 }
 
 double rtmidi_in_get_message (RtMidiInPtr device,
@@ -347,6 +409,12 @@ RtMidiOutPtr rtmidi_out_create_default ()
         wrp->error_callback_proxy = 0;
         wrp->ok  = false;
         rtmidi_set_error_msg (wrp, err.what ());
+    } catch (...) {
+        wrp->ptr = 0;
+        wrp->callback_proxy = 0;
+        wrp->error_callback_proxy = 0;
+        wrp->ok  = false;
+        rtmidi_set_error_msg (wrp, "Unknown error");
     }
 
     return wrp;
@@ -355,7 +423,7 @@ RtMidiOutPtr rtmidi_out_create_default ()
 RtMidiOutPtr rtmidi_out_create (enum RtMidiApi api, const char *clientName)
 {
     RtMidiWrapper* wrp = new RtMidiWrapper{};
-    std::string name = clientName;
+    std::string name = clientName ? clientName : "";
 
     try {
         RtMidiOut* rOut = new RtMidiOut ((RtMidi::Api) api, name);
@@ -396,11 +464,23 @@ enum RtMidiApi rtmidi_out_get_current_api (RtMidiPtr device)
         rtmidi_set_error_msg (device, err.what ());
 
         return RTMIDI_API_UNSPECIFIED;
+    } catch (...) {
+        device->ok  = false;
+        rtmidi_set_error_msg (device, "Unknown error");
+
+        return RTMIDI_API_UNSPECIFIED;
     }
 }
 
 int rtmidi_out_send_message (RtMidiOutPtr device, const unsigned char *message, int length)
 {
+    // A negative length would convert to an enormous size_t and read far
+    // past the buffer; a null buffer with a positive length is equally bad.
+    if (length < 0 || (length > 0 && message == nullptr)) {
+        device->ok = false;
+        rtmidi_set_error_msg (device, "Invalid message buffer or length");
+        return -1;
+    }
     try {
         ((RtMidiOut*) device->ptr)->sendMessage (message, length);
         return 0;

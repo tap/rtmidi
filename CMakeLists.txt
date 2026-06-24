@@ -245,8 +245,9 @@ if (RTMIDI_BUILD_TESTING)
   add_executable(testcapi   tests/testcapi.c)
   add_executable(queuestress tests/queuestress.cpp)
   add_executable(midiparse  tests/midiparse.cpp)
+  add_executable(testc_hardening tests/testc_hardening.c)
   list(GET LIB_TARGETS 0 LIBRTMIDI)
-  set_target_properties(cmidiin midiclock midiout midiprobe qmidiin sysextest apinames testcapi queuestress midiparse
+  set_target_properties(cmidiin midiclock midiout midiprobe qmidiin sysextest apinames testcapi queuestress midiparse testc_hardening
     PROPERTIES RUNTIME_OUTPUT_DIRECTORY tests
                INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR}
                LINK_LIBRARIES ${LIBRTMIDI})
@@ -256,6 +257,7 @@ if (RTMIDI_BUILD_TESTING)
   add_test(NAME apinames COMMAND apinames)
   add_test(NAME queuestress COMMAND queuestress)
   add_test(NAME midiparse COMMAND midiparse)
+  add_test(NAME testc_hardening COMMAND testc_hardening)
 endif()
 
 # Set standard installation directories.

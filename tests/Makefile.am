@@ -1,6 +1,6 @@
 
 noinst_PROGRAMS = midiprobe midiout qmidiin cmidiin sysextest midiclock_in midiclock_out	\
-	apinames testcapi queuestress midiparse
+	apinames testcapi queuestress midiparse testc_hardening
 
 AM_CXXFLAGS = -Wall -I$(top_srcdir)
 AM_CFLAGS = -Wall -I$(top_srcdir)
@@ -42,7 +42,11 @@ queuestress_LDFLAGS = -pthread
 midiparse_SOURCES = midiparse.cpp
 midiparse_LDADD = $(top_builddir)/librtmidi.la
 
+# C-ABI hardening test for the C wrapper (NULL args, invalid lengths).
+testc_hardening_SOURCES = testc_hardening.c
+testc_hardening_LDADD = $(top_builddir)/librtmidi.la
+
 EXTRA_DIST = cmidiin.dsp midiout.dsp midiprobe.dsp qmidiin.dsp	\
 	sysextest.dsp RtMidi.dsw
 
-TESTS = apinames queuestress midiparse
+TESTS = apinames queuestress midiparse testc_hardening
