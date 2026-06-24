@@ -34,6 +34,18 @@ int test_cpp() {
         std::cout << "* " << (int)apis[i] << " '" << name << "': '" << displayName << "'\n";
     }
 
+    // ensure the compiled-API list contains no duplicates (a backend
+    // listed twice, e.g. via a copy-pasted #if block, would show up here)
+    for ( size_t i = 0; i < apis.size(); ++i ) {
+        for ( size_t j = i + 1; j < apis.size(); ++j ) {
+            if ( apis[i] == apis[j] ) {
+                std::cout << "Duplicate compiled API " << (int)apis[i]
+                          << " ('" << RtMidi::getApiName(apis[i]) << "')\n";
+                exit(1);
+            }
+        }
+    }
+
     // ensure unknown APIs return the empty string
     {
         const std::string name = RtMidi::getApiName((RtMidi::Api)-1);

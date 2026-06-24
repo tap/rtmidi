@@ -77,6 +77,7 @@
                         "." RTMIDI_TOSTRING(RTMIDI_VERSION_PATCH)
 #endif
 
+#include <atomic>
 #include <exception>
 #include <iostream>
 #include <string>
@@ -596,9 +597,19 @@ class RTMIDI_DLL_PUBLIC MidiInApi : public MidiApi
       : bytes(0), timeStamp(0.0) {}
   };
 
-  struct MidiQueue {
-    unsigned int front;
-    unsigned int back;
+  // Exported explicitly: a class-level dllexport on MidiInApi does not
+  // propagate to nested types, so the queue methods would otherwise be
+  // missing from the Windows import library (e.g. for the unit tests).
+  struct RTMIDI_DLL_PUBLIC MidiQueue {
+    // front/back are accessed concurrently by the MIDI input thread
+    // (producer, via push) and the user thread (consumer, via pop), so
+    // they must be atomic to avoid a data race.  This is a single-
+    // producer / single-consumer ring buffer: the producer publishes a
+    // message with a release store to "back", and the consumer observes
+    // it with an acquire load, which guarantees the message payload write
+    // is visible before the index update.
+    std::atomic<unsigned int> front;
+    std::atomic<unsigned int> back;
     unsigned int ringSize;
     MidiMessage *ring;
 
@@ -609,6 +620,23 @@ class RTMIDI_DLL_PUBLIC MidiInApi : public MidiApi
     bool pop( std::vector<unsigned char>*, double* );
     unsigned int size( unsigned int *back=0, unsigned int *front=0 );
   };
+
+  //! Process the raw bytes of one received MIDI event.
+  /*!
+    Accumulates \c bytes into \c message and updates the SysEx
+    continuation state \c continueSysex according to \c ignoreFlags
+    (bit 0: SysEx, bit 1: time/clock, bit 2: active sensing).  Returns
+    true when a complete, non-filtered message is ready to be delivered
+    (queued or passed to the user callback), false when the event was
+    filtered out or is an incomplete SysEx awaiting more data.
+
+    This is the shared message-assembly logic used by the input
+    backends.  It is a static member with no MIDI dependencies so it can
+    be unit tested directly, and it tolerates zero-length events.
+  */
+  static bool collectMessage( const unsigned char *bytes, size_t size,
+                              unsigned char ignoreFlags,
+                              bool &continueSysex, MidiMessage &message );
 
   // The RtMidiInData structure is used to pass private class data to
   // the MIDI input handling function or thread.

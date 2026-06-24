@@ -522,9 +522,6 @@ extern "C" const RtMidi::Api rtmidi_compiled_apis[] = {
 #if defined(__WEB_MIDI_API__)
   RtMidi::WEB_MIDI_API,
 #endif
-#if defined(__WEB_MIDI_API__)
-  RtMidi::WEB_MIDI_API,
-#endif
 #if defined(__AMIDI__)
   RtMidi::ANDROID_AMIDI,
 #endif
@@ -798,8 +795,13 @@ void MidiApi :: error( RtMidiError::Type type, std::string errorString )
 MidiInApi :: MidiInApi( unsigned int queueSizeLimit )
   : MidiApi()
 {
-  // Allocate the MIDI queue.
-  inputData_.queue.ringSize = queueSizeLimit;
+  // Allocate the MIDI queue.  The ring buffer reserves one slot to tell
+  // "full" apart from "empty", so allocate one more than the requested
+  // capacity; this makes the usable capacity equal queueSizeLimit (as
+  // documented).  It also means a request of 0 produces a 1-slot ring whose
+  // push() always reports full, rather than a 0-slot ring that would later
+  // divide by zero and dereference a null pointer in push().
+  inputData_.queue.ringSize = queueSizeLimit + 1;
   if ( inputData_.queue.ringSize > 0 )
     inputData_.queue.ring = new MidiMessage[ inputData_.queue.ringSize ];
 }
@@ -877,8 +879,12 @@ unsigned int MidiInApi::MidiQueue::size( unsigned int *__back,
                                          unsigned int *__front )
 {
   // Access back/front members exactly once and make stack copies for
-  // size calculation
-  unsigned int _back = back, _front = front, _size;
+  // size calculation.  Both are loaded with acquire ordering so that a
+  // consumer reading "back" sees the producer's payload write, and a
+  // producer reading "front" sees the consumer's slot release.
+  unsigned int _back = back.load( std::memory_order_acquire );
+  unsigned int _front = front.load( std::memory_order_acquire );
+  unsigned int _size;
   if ( _back >= _front )
     _size = _back - _front;
   else
@@ -894,6 +900,11 @@ unsigned int MidiInApi::MidiQueue::size( unsigned int *__back,
 // As long as we haven't reached our queue size limit, push the message.
 bool MidiInApi::MidiQueue::push( const MidiInApi::MidiMessage& msg )
 {
+  // A zero-size ring has no storage: refuse rather than dividing by
+  // ringSize and writing through a null ring pointer below.
+  if ( ringSize == 0 || ring == 0 )
+    return false;
+
   // Local stack copies of front/back
   unsigned int _back, _front, _size;
 
@@ -903,7 +914,10 @@ bool MidiInApi::MidiQueue::push( const MidiInApi::MidiMessage& msg )
   if ( _size < ringSize-1 )
   {
     ring[_back] = msg;
-    back = (back+1)%ringSize;
+    // Publish the new message: the release store pairs with the acquire
+    // load of "back" in the consumer, guaranteeing the payload write above
+    // is visible before the index advances.
+    back.store( (_back+1)%ringSize, std::memory_order_release );
     return true;
   }
 
@@ -925,9 +939,63 @@ bool MidiInApi::MidiQueue::pop( std::vector<unsigned char> *msg, double* timeSta
   msg->assign( ring[_front].bytes.begin(), ring[_front].bytes.end() );
   *timeStamp = ring[_front].timeStamp;
 
-  // Update front
-  front = (front+1)%ringSize;
+  // Release the slot back to the producer: the release store pairs with
+  // the acquire load of "front" in the producer.
+  front.store( (_front+1)%ringSize, std::memory_order_release );
   return true;
+}
+
+// Shared MIDI input message assembly, factored out of the per-backend
+// input handlers so the (formerly duplicated) logic lives and is tested in
+// exactly one place.  Returns true when a complete message is ready to be
+// delivered.  Guards against zero-length events, which would otherwise read
+// bytes[size - 1] out of bounds.
+bool MidiInApi::collectMessage( const unsigned char *bytes, size_t size,
+                                unsigned char ignoreFlags,
+                                bool &continueSysex, MidiMessage &message )
+{
+  // A zero-length event carries no status byte: nothing to do, and reading
+  // bytes[0] / bytes[size - 1] would be out of bounds.
+  if ( size == 0 )
+    return false;
+
+  // Start a fresh message unless we are mid-SysEx (in which case we append).
+  if ( !continueSysex )
+    message.bytes.clear();
+
+  // Unless this is a (possibly continued) SysEx message we are ignoring,
+  // copy the event bytes into the message.
+  if ( !( ( continueSysex || bytes[0] == 0xF0 ) && ( ignoreFlags & 0x01 ) ) ) {
+    for ( size_t i = 0; i < size; i++ )
+      message.bytes.push_back( bytes[i] );
+  }
+
+  switch ( bytes[0] ) {
+    case 0xF0:
+      // Start of a SysEx message: it continues unless this chunk ends it.
+      continueSysex = bytes[size - 1] != 0xF7;
+      if ( ignoreFlags & 0x01 ) return false;
+      break;
+    case 0xF1:
+    case 0xF8:
+      // MIDI Time Code or Timing Clock message.
+      if ( ignoreFlags & 0x02 ) return false;
+      break;
+    case 0xFE:
+      // Active Sensing message.
+      if ( ignoreFlags & 0x04 ) return false;
+      break;
+    default:
+      if ( continueSysex ) {
+        // Continuation of a SysEx message.
+        continueSysex = bytes[size - 1] != 0xF7;
+        if ( ignoreFlags & 0x01 ) return false;
+      }
+      // All other MIDI messages fall through and are delivered.
+  }
+
+  // Deliver only once a SysEx is complete (or for any non-SysEx message).
+  return !continueSysex;
 }
 
 //*********************************************************************//
@@ -4041,43 +4109,10 @@ static int jackProcessIn( jack_nframes_t nframes, void *arg )
 
     jData->lastTime = time;
 
-    if ( !continueSysex )
-      message.bytes.clear();
-
-    if ( !( ( continueSysex || event.buffer[0] == 0xF0 ) && ( ignoreFlags & 0x01 ) ) ) {
-      // Unless this is a (possibly continued) SysEx message and we're ignoring SysEx,
-      // copy the event buffer into the MIDI message struct.
-      for ( unsigned int i = 0; i < event.size; i++ )
-        message.bytes.push_back( event.buffer[i] );
-    }
-
-    switch ( event.buffer[0] ) {
-      case 0xF0:
-        // Start of a SysEx message
-        continueSysex = event.buffer[event.size - 1] != 0xF7;
-        if ( ignoreFlags & 0x01 ) continue;
-        break;
-      case 0xF1:
-      case 0xF8:
-        // MIDI Time Code or Timing Clock message
-        if ( ignoreFlags & 0x02 ) continue;
-        break;
-      case 0xFE:
-        // Active Sensing message
-        if ( ignoreFlags & 0x04 ) continue;
-        break;
-      default:
-        if ( continueSysex ) {
-          // Continuation of a SysEx message
-          continueSysex = event.buffer[event.size - 1] != 0xF7;
-          if ( ignoreFlags & 0x01 ) continue;
-        }
-        // All other MIDI messages
-    }
-
-    if ( !continueSysex ) {
-      // If not a continuation of a SysEx message,
-      // invoke the user callback function or queue the message.
+    if ( MidiInApi::collectMessage( event.buffer, event.size, ignoreFlags,
+                                    continueSysex, message ) ) {
+      // A complete message is ready: invoke the user callback function or
+      // queue the message.
       if ( rtData->usingCallback ) {
         RtMidiIn::RtMidiCallback callback = (RtMidiIn::RtMidiCallback) rtData->userCallback;
         callback( message.timeStamp, &message.bytes, rtData->userData );
@@ -5132,32 +5167,11 @@ void* MidiInAndroid :: pollMidi(void* context) {
       break;
     }
 
-    switch (incomingMessage[0]) {
-      case 0xF0:
-        // Start of a SysEx message
-        continueSysex = incomingMessage[numBytesReceived - 1] != 0xF7;
-            if (ignoreFlags & 0x01) continue;
-            break;
-      case 0xF1:
-      case 0xF8:
-        // MIDI Time Code or Timing Clock message
-        if (ignoreFlags & 0x02) continue;
-            break;
-      case 0xFE:
-        // Active Sensing message
-        if (ignoreFlags & 0x04) continue;
-            break;
-      default:
-        if (continueSysex) {
-          // Continuation of a SysEx message
-          continueSysex = incomingMessage[numBytesReceived - 1] != 0xF7;
-          if (ignoreFlags & 0x01) continue;
-        }
-            // All other MIDI messages
-    }
-
-    if (numMessagesReceived > 0 && numBytesReceived >= 0) {
-      auto message = self->inputData_.message;
+    if (numMessagesReceived > 0) {
+      // Use a reference (not a copy) so SysEx reassembly state persists
+      // across poll iterations; a copy would discard partially-accumulated
+      // messages and leave inputData_.message untouched.
+      MidiInApi::MidiMessage& message = self->inputData_.message;
 
       if (self->inputData_.firstMessage == true) {
         message.timeStamp = 0.0;
@@ -5167,16 +5181,8 @@ void* MidiInAndroid :: pollMidi(void* context) {
       }
       self->lastTime = (timestamp * 0.000001);
 
-      if (!continueSysex) message.bytes.clear();
-
-      if ( !( ( continueSysex || incomingMessage[0] == 0xF0 ) && ( ignoreFlags & 0x01 ) ) ) {
-        // Unless this is a (possibly continued) SysEx message and we're ignoring SysEx,
-        // copy the event buffer into the MIDI message struct.
-        for (unsigned int i=0; i<numBytesReceived; i++)
-          message.bytes.push_back(incomingMessage[i]);
-      }
-
-      if (!continueSysex) {
+      if ( MidiInApi::collectMessage( incomingMessage, numBytesReceived,
+                                      ignoreFlags, continueSysex, message ) ) {
         if (self->inputData_.usingCallback) {
           auto callback = (RtMidiIn::RtMidiCallback) self->inputData_.userCallback;
           callback(message.timeStamp, &message.bytes, self->inputData_.userData);

@@ -2,6 +2,10 @@ name: C/C++ CI
 
 on: [push, pull_request]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   Linux:
     runs-on: ubuntu-latest
@@ -15,7 +19,7 @@ jobs:
             APIcmake: ALSA
             deps: libasound-dev
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
       with:
         fetch-depth: 0
     - name: install dependencies
@@ -36,7 +40,7 @@ jobs:
   MacOS:
     runs-on: macOS-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
       with:
         fetch-depth: 0
     - name: install dependencies
@@ -59,7 +63,7 @@ jobs:
           - host: x86_64-w64-mingw32
             api: winmm
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
       with:
         fetch-depth: 0
     - name: install dependencies
@@ -72,3 +76,119 @@ jobs:
         && mkdir bld-automake && cd bld-automake
         && (../configure --host=${{matrix.host}} --with-${{matrix.api}} CPPFLAGS=${{matrix.cppflags}} || (cat config.log; false))
         && make V=1
+
+  Sanitizers:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: asan-ubsan
+            sanitize: address,undefined
+          - name: tsan
+            sanitize: thread
+    name: Sanitizers (${{matrix.name}})
+    env:
+      # Fail the build on any UBSan diagnostic instead of merely printing it.
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+      ASAN_OPTIONS: detect_leaks=1
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: install dependencies
+      run:
+        sudo apt-get update
+        && sudo apt-get install g++ autoconf-archive cmake libasound-dev
+    - name: build and test (ALSA)
+      run:
+        env NOCONFIGURE=1 ./autogen.sh
+        && mkdir bld-sanitize && cd bld-sanitize
+        && (../configure --with-alsa
+            CXXFLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=${{matrix.sanitize}} -fno-sanitize-recover=all"
+            LDFLAGS="-fsanitize=${{matrix.sanitize}}"
+            || (cat config.log; false))
+        && make V=1 && make check
+
+  # Native Windows build with MSVC (the WinMM backend, default on WIN32).
+  # The autotools/MinGW job only cross-compiles; this exercises the real
+  # toolchain that consumes the msw/*.vcxproj and tests/*.vcxproj files.
+  MSVC:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: CMake configure
+      # Build a static library so the test executables link the library
+      # directly. A shared (DLL) build places rtmidi.dll in a different
+      # output directory than the test .exe files, so at runtime Windows
+      # cannot locate the DLL and every test stalls until it times out.
+      run: cmake -B bld-msvc -DRTMIDI_API_WINMM=ON -DBUILD_SHARED_LIBS=OFF
+    - name: CMake build
+      run: cmake --build bld-msvc --config Release --verbose
+    - name: Test
+      run: ctest --test-dir bld-msvc -C Release --output-on-failure
+
+  # Web/Emscripten build. The Web MIDI backend has no CMake support, so we
+  # compile the library translation units (and link a sample program) to
+  # WebAssembly directly with em++ -D__WEB_MIDI_API__.
+  WebMIDI:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: install emscripten
+      run: sudo apt-get update && sudo apt-get install -y emscripten
+    - name: compile to WebAssembly
+      run:
+        em++ -std=c++11 -Wall -D__WEB_MIDI_API__ -I. -c RtMidi.cpp -o RtMidi.o
+        && em++ -std=c++11 -Wall -D__WEB_MIDI_API__ -I. -c rtmidi_c.cpp -o rtmidi_c.o
+        && em++ -std=c++11 -D__WEB_MIDI_API__ -I. tests/cmidiin.cpp RtMidi.o -o cmidiin.js
+
+  # Android build of the native library via the NDK CMake toolchain
+  # (the __AMIDI__ backend, which needs API level >= 29 for libamidi).
+  # Builds the canonical RtMidi.cpp, not the vendored copy under android/.
+  Android:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: CMake configure (NDK, arm64-v8a)
+      # Build a static library: this is a compile/archive smoke test for the
+      # __AMIDI__ backend. A shared library would fail to link because
+      # androidGetThreadEnv() references JNI_GetCreatedJavaVMs, which is
+      # resolved at runtime by the host app's JVM (not available standalone).
+      run:
+        cmake -B bld-android
+        -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake"
+        -DANDROID_ABI=arm64-v8a
+        -DANDROID_PLATFORM=android-31
+        -DBUILD_SHARED_LIBS=OFF
+        -DRTMIDI_API_AMIDI=ON
+        -DRTMIDI_BUILD_TESTING=OFF
+    - name: CMake build
+      run: cmake --build bld-android --verbose
+
+  # "Embedded" target: a Raspberry Pi / ARM SBC running Linux uses ALSA, so
+  # we cross-compile the library for aarch64-linux-gnu. (A bare-metal board
+  # such as an RP2040 Pico is intentionally NOT covered: RtMidi wraps an OS
+  # MIDI API and has no bare-metal backend, so it would only build the no-op
+  # Dummy API there.) ALSA headers are arch-independent, so this is a
+  # compile-only smoke test that catches ARM-specific issues.
+  CrossARM:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: install cross toolchain
+      run:
+        sudo apt-get update
+        && sudo apt-get install -y g++-aarch64-linux-gnu libasound-dev
+    - name: cross-compile for aarch64 (ALSA)
+      run:
+        aarch64-linux-gnu-g++ -std=c++11 -Wall -D__LINUX_ALSA__ -I. -c RtMidi.cpp -o RtMidi-arm64.o
+        && aarch64-linux-gnu-g++ -std=c++11 -Wall -D__LINUX_ALSA__ -I. -c rtmidi_c.cpp -o rtmidi_c-arm64.o

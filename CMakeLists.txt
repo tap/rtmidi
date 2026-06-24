@@ -243,12 +243,25 @@ if (RTMIDI_BUILD_TESTING)
   add_executable(sysextest  tests/sysextest.cpp)
   add_executable(apinames   tests/apinames.cpp)
   add_executable(testcapi   tests/testcapi.c)
+  add_executable(queuestress tests/queuestress.cpp)
+  add_executable(midiparse  tests/midiparse.cpp)
+  add_executable(testc_hardening tests/testc_hardening.c)
   list(GET LIB_TARGETS 0 LIBRTMIDI)
-  set_target_properties(cmidiin midiclock midiout midiprobe qmidiin sysextest apinames testcapi
+  set_target_properties(cmidiin midiclock midiout midiprobe qmidiin sysextest apinames testcapi queuestress midiparse testc_hardening
     PROPERTIES RUNTIME_OUTPUT_DIRECTORY tests
                INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR}
                LINK_LIBRARIES ${LIBRTMIDI})
+  # queuestress uses std::thread; ensure it links against the threading lib.
+  find_package(Threads REQUIRED)
+  target_link_libraries(queuestress Threads::Threads)
   add_test(NAME apinames COMMAND apinames)
+  add_test(NAME queuestress COMMAND queuestress)
+  add_test(NAME midiparse COMMAND midiparse)
+  add_test(NAME testc_hardening COMMAND testc_hardening)
+  # Bound each test so a hang (e.g. a queue spin-wait starving on an
+  # oversubscribed runner) fails fast instead of stalling the whole job.
+  set_tests_properties(apinames queuestress midiparse testc_hardening
+    PROPERTIES TIMEOUT 120)
 endif()
 
 # Set standard installation directories.
