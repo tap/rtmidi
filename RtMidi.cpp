@@ -522,9 +522,6 @@ extern "C" const RtMidi::Api rtmidi_compiled_apis[] = {
 #if defined(__WEB_MIDI_API__)
   RtMidi::WEB_MIDI_API,
 #endif
-#if defined(__WEB_MIDI_API__)
-  RtMidi::WEB_MIDI_API,
-#endif
 #if defined(__AMIDI__)
   RtMidi::ANDROID_AMIDI,
 #endif
@@ -798,8 +795,13 @@ void MidiApi :: error( RtMidiError::Type type, std::string errorString )
 MidiInApi :: MidiInApi( unsigned int queueSizeLimit )
   : MidiApi()
 {
-  // Allocate the MIDI queue.
-  inputData_.queue.ringSize = queueSizeLimit;
+  // Allocate the MIDI queue.  The ring buffer reserves one slot to tell
+  // "full" apart from "empty", so allocate one more than the requested
+  // capacity; this makes the usable capacity equal queueSizeLimit (as
+  // documented).  It also means a request of 0 produces a 1-slot ring whose
+  // push() always reports full, rather than a 0-slot ring that would later
+  // divide by zero and dereference a null pointer in push().
+  inputData_.queue.ringSize = queueSizeLimit + 1;
   if ( inputData_.queue.ringSize > 0 )
     inputData_.queue.ring = new MidiMessage[ inputData_.queue.ringSize ];
 }
@@ -898,6 +900,11 @@ unsigned int MidiInApi::MidiQueue::size( unsigned int *__back,
 // As long as we haven't reached our queue size limit, push the message.
 bool MidiInApi::MidiQueue::push( const MidiInApi::MidiMessage& msg )
 {
+  // A zero-size ring has no storage: refuse rather than dividing by
+  // ringSize and writing through a null ring pointer below.
+  if ( ringSize == 0 || ring == 0 )
+    return false;
+
   // Local stack copies of front/back
   unsigned int _back, _front, _size;
 
