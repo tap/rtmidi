@@ -1,6 +1,6 @@
 
 noinst_PROGRAMS = midiprobe midiout qmidiin cmidiin sysextest midiclock_in midiclock_out	\
-	apinames testcapi
+	apinames testcapi queuestress
 
 AM_CXXFLAGS = -Wall -I$(top_srcdir)
 AM_CFLAGS = -Wall -I$(top_srcdir)
@@ -32,7 +32,13 @@ apinames_LDADD = $(top_builddir)/librtmidi.la
 testcapi_SOURCES = testcapi.c
 testcapi_LDADD = $(top_builddir)/librtmidi.la
 
+# Threaded queue regression test: needs pthread for std::thread.
+queuestress_SOURCES = queuestress.cpp
+queuestress_CXXFLAGS = $(AM_CXXFLAGS) -pthread
+queuestress_LDADD = $(top_builddir)/librtmidi.la
+queuestress_LDFLAGS = -pthread
+
 EXTRA_DIST = cmidiin.dsp midiout.dsp midiprobe.dsp qmidiin.dsp	\
 	sysextest.dsp RtMidi.dsw
 
-TESTS = apinames
+TESTS = apinames queuestress

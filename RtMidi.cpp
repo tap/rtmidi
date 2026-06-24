@@ -877,8 +877,12 @@ unsigned int MidiInApi::MidiQueue::size( unsigned int *__back,
                                          unsigned int *__front )
 {
   // Access back/front members exactly once and make stack copies for
-  // size calculation
-  unsigned int _back = back, _front = front, _size;
+  // size calculation.  Both are loaded with acquire ordering so that a
+  // consumer reading "back" sees the producer's payload write, and a
+  // producer reading "front" sees the consumer's slot release.
+  unsigned int _back = back.load( std::memory_order_acquire );
+  unsigned int _front = front.load( std::memory_order_acquire );
+  unsigned int _size;
   if ( _back >= _front )
     _size = _back - _front;
   else
@@ -903,7 +907,10 @@ bool MidiInApi::MidiQueue::push( const MidiInApi::MidiMessage& msg )
   if ( _size < ringSize-1 )
   {
     ring[_back] = msg;
-    back = (back+1)%ringSize;
+    // Publish the new message: the release store pairs with the acquire
+    // load of "back" in the consumer, guaranteeing the payload write above
+    // is visible before the index advances.
+    back.store( (_back+1)%ringSize, std::memory_order_release );
     return true;
   }
 
@@ -925,8 +932,9 @@ bool MidiInApi::MidiQueue::pop( std::vector<unsigned char> *msg, double* timeSta
   msg->assign( ring[_front].bytes.begin(), ring[_front].bytes.end() );
   *timeStamp = ring[_front].timeStamp;
 
-  // Update front
-  front = (front+1)%ringSize;
+  // Release the slot back to the producer: the release store pairs with
+  // the acquire load of "front" in the producer.
+  front.store( (_front+1)%ringSize, std::memory_order_release );
   return true;
 }
 

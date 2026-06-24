@@ -77,6 +77,7 @@
                         "." RTMIDI_TOSTRING(RTMIDI_VERSION_PATCH)
 #endif
 
+#include <atomic>
 #include <exception>
 #include <iostream>
 #include <string>
@@ -597,8 +598,15 @@ class RTMIDI_DLL_PUBLIC MidiInApi : public MidiApi
   };
 
   struct MidiQueue {
-    unsigned int front;
-    unsigned int back;
+    // front/back are accessed concurrently by the MIDI input thread
+    // (producer, via push) and the user thread (consumer, via pop), so
+    // they must be atomic to avoid a data race.  This is a single-
+    // producer / single-consumer ring buffer: the producer publishes a
+    // message with a release store to "back", and the consumer observes
+    // it with an acquire load, which guarantees the message payload write
+    // is visible before the index update.
+    std::atomic<unsigned int> front;
+    std::atomic<unsigned int> back;
     unsigned int ringSize;
     MidiMessage *ring;
 
