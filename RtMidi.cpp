@@ -2947,6 +2947,21 @@ void MidiInWinMM :: openPort( unsigned int portNumber, const std::string &/*port
 
   // Allocate and init the sysex buffers.
   data->sysexBuffer.resize( inputData_.bufferCount );
+
+  // On any failure below, unprepare and free every buffer allocated so far
+  // and close the handle, so a partially-opened port does not leak.
+  auto cleanupBuffers = [&]( size_t allocated ) {
+    midiInReset( data->inHandle );
+    for ( size_t j=0; j < allocated; ++j ) {
+      midiInUnprepareHeader( data->inHandle, data->sysexBuffer[j], sizeof(MIDIHDR) );
+      delete [] data->sysexBuffer[j]->lpData;
+      delete [] data->sysexBuffer[j];
+    }
+    data->sysexBuffer.clear();
+    midiInClose( data->inHandle );
+    data->inHandle = 0;
+  };
+
   for ( unsigned int i=0; i < inputData_.bufferCount; ++i ) {
     data->sysexBuffer[i] = (MIDIHDR*) new char[ sizeof(MIDIHDR) ];
     data->sysexBuffer[i]->lpData = new char[ inputData_.bufferSize ];
@@ -2956,8 +2971,7 @@ void MidiInWinMM :: openPort( unsigned int portNumber, const std::string &/*port
 
     result = midiInPrepareHeader( data->inHandle, data->sysexBuffer[i], sizeof(MIDIHDR) );
     if ( result != MMSYSERR_NOERROR ) {
-      midiInClose( data->inHandle );
-      data->inHandle = 0;
+      cleanupBuffers( i + 1 );
       errorString_ = "MidiInWinMM::openPort: error starting Windows MM MIDI input port (PrepareHeader).";
       error( RtMidiError::DRIVER_ERROR, errorString_ );
       return;
@@ -2966,8 +2980,7 @@ void MidiInWinMM :: openPort( unsigned int portNumber, const std::string &/*port
     // Register the buffer.
     result = midiInAddBuffer( data->inHandle, data->sysexBuffer[i], sizeof(MIDIHDR) );
     if ( result != MMSYSERR_NOERROR ) {
-      midiInClose( data->inHandle );
-      data->inHandle = 0;
+      cleanupBuffers( i + 1 );
       errorString_ = "MidiInWinMM::openPort: error starting Windows MM MIDI input port (AddBuffer).";
       error( RtMidiError::DRIVER_ERROR, errorString_ );
       return;
@@ -2976,8 +2989,7 @@ void MidiInWinMM :: openPort( unsigned int portNumber, const std::string &/*port
 
   result = midiInStart( data->inHandle );
   if ( result != MMSYSERR_NOERROR ) {
-    midiInClose( data->inHandle );
-    data->inHandle = 0;
+    cleanupBuffers( data->sysexBuffer.size() );
     errorString_ = "MidiInWinMM::openPort: error starting Windows MM MIDI input port.";
     error( RtMidiError::DRIVER_ERROR, errorString_ );
     return;
@@ -3001,23 +3013,29 @@ void MidiInWinMM :: closePort( void )
     midiInReset( data->inHandle );
     midiInStop( data->inHandle );
 
+    // Free every buffer even if an unprepare fails, and never return early
+    // while holding the critical section (that would leak the lock and the
+    // remaining buffers). Record the error and report it after unlocking.
+    MMRESULT unprepareResult = MMSYSERR_NOERROR;
     for ( size_t i=0; i < data->sysexBuffer.size(); ++i ) {
-      int result = midiInUnprepareHeader(data->inHandle, data->sysexBuffer[i], sizeof(MIDIHDR));
+      MMRESULT result = midiInUnprepareHeader(data->inHandle, data->sysexBuffer[i], sizeof(MIDIHDR));
+      if ( result != MMSYSERR_NOERROR )
+        unprepareResult = result;
       delete [] data->sysexBuffer[i]->lpData;
       delete [] data->sysexBuffer[i];
-      if ( result != MMSYSERR_NOERROR ) {
-        midiInClose( data->inHandle );
-        data->inHandle = 0;
-        errorString_ = "MidiInWinMM::openPort: error closing Windows MM MIDI input port (midiInUnprepareHeader).";
-        error( RtMidiError::DRIVER_ERROR, errorString_ );
-        return;
-      }
     }
+    data->sysexBuffer.clear();
 
     midiInClose( data->inHandle );
     data->inHandle = 0;
     connected_ = false;
     LeaveCriticalSection( &(data->_mutex) );
+
+    // error() may throw, so only call it once the lock has been released.
+    if ( unprepareResult != MMSYSERR_NOERROR ) {
+      errorString_ = "MidiInWinMM::closePort: error closing Windows MM MIDI input port (midiInUnprepareHeader).";
+      error( RtMidiError::DRIVER_ERROR, errorString_ );
+    }
   }
 }
 
@@ -4079,6 +4097,7 @@ struct JackMidiData {
   jack_ringbuffer_t *buff;
   int buffMaxWrite; // actual writable size, usually 1 less than ringbuffer
   jack_time_t lastTime;
+  bool active = false; // whether the client is currently activated in the graph
 #ifdef HAVE_SEMAPHORE
   sem_t sem_cleanup;
   sem_t sem_needpost;
@@ -4162,18 +4181,23 @@ void MidiInJack :: initialize( const std::string& clientName )
 void MidiInJack :: connect()
 {
   JackMidiData *data = static_cast<JackMidiData *> (apiData_);
-  if ( data->client )
-    return;
 
   // Initialize JACK client
-  if (( data->client = jack_client_open( clientName.c_str(), JackNoStartServer, NULL )) == 0) {
-    errorString_ = "MidiInJack::initialize: JACK server not running?";
-    error( RtMidiError::WARNING, errorString_ );
-    return;
+  if ( data->client == NULL ) {
+    if (( data->client = jack_client_open( clientName.c_str(), JackNoStartServer, NULL )) == 0) {
+      errorString_ = "MidiInJack::initialize: JACK server not running?";
+      error( RtMidiError::WARNING, errorString_ );
+      return;
+    }
+    jack_set_process_callback( data->client, jackProcessIn, data );
   }
 
-  jack_set_process_callback( data->client, jackProcessIn, data );
-  jack_activate( data->client );
+  // (Re)activate the client in the processing graph. closePort() deactivates
+  // it to quiesce the realtime callback, so a reopen must reactivate here.
+  if ( !data->active ) {
+    jack_activate( data->client );
+    data->active = true;
+  }
 }
 
 MidiInJack :: ~MidiInJack()
@@ -4286,6 +4310,15 @@ void MidiInJack :: closePort()
   JackMidiData *data = static_cast<JackMidiData *> (apiData_);
 
   if ( data->port == NULL ) return;
+
+  // Deactivate the client first so the realtime process callback is quiesced
+  // before the port it uses is unregistered (avoids a use-after-free / torn
+  // read of data->port in jackProcessIn). connect() reactivates on reopen.
+  if ( data->client && data->active ) {
+    jack_deactivate( data->client );
+    data->active = false;
+  }
+
   jack_port_unregister( data->client, data->port );
   data->port = NULL;
 
@@ -4371,22 +4404,26 @@ void MidiOutJack :: initialize( const std::string& clientName )
 void MidiOutJack :: connect()
 {
   JackMidiData *data = static_cast<JackMidiData *> (apiData_);
-  if ( data->client )
-    return;
 
-  // Initialize output ringbuffers
-  data->buff = jack_ringbuffer_create( JACK_RINGBUFFER_SIZE );
-  data->buffMaxWrite = (int) jack_ringbuffer_write_space( data->buff );
+  // Initialize JACK client and output ringbuffer on first connect.
+  if ( data->client == NULL ) {
+    data->buff = jack_ringbuffer_create( JACK_RINGBUFFER_SIZE );
+    data->buffMaxWrite = (int) jack_ringbuffer_write_space( data->buff );
 
-  // Initialize JACK client
-  if ( ( data->client = jack_client_open( clientName.c_str(), JackNoStartServer, NULL ) ) == 0 ) {
-    errorString_ = "MidiOutJack::initialize: JACK server not running?";
-    error( RtMidiError::WARNING, errorString_ );
-    return;
+    if ( ( data->client = jack_client_open( clientName.c_str(), JackNoStartServer, NULL ) ) == 0 ) {
+      errorString_ = "MidiOutJack::initialize: JACK server not running?";
+      error( RtMidiError::WARNING, errorString_ );
+      return;
+    }
+    jack_set_process_callback( data->client, jackProcessOut, data );
   }
 
-  jack_set_process_callback( data->client, jackProcessOut, data );
-  jack_activate( data->client );
+  // (Re)activate the client; closePort() deactivates it, so a reopen must
+  // reactivate here.
+  if ( !data->active ) {
+    jack_activate( data->client );
+    data->active = true;
+  }
 }
 
 MidiOutJack :: ~MidiOutJack()
@@ -4515,6 +4552,9 @@ void MidiOutJack :: closePort()
   if ( data->port == NULL ) return;
 
 #ifdef HAVE_SEMAPHORE
+  // Hand off to the still-active process callback so it can drain any pending
+  // output before we tear the port down. This must run before jack_deactivate,
+  // otherwise the callback would never post sem_cleanup.
   struct timespec ts;
   if ( clock_gettime( CLOCK_REALTIME, &ts ) != -1 ) {
     ts.tv_sec += 1; // wait max one second
@@ -4522,6 +4562,12 @@ void MidiOutJack :: closePort()
     sem_timedwait( &data->sem_cleanup, &ts );
   }
 #endif
+
+  // Quiesce the realtime callback before unregistering the port it uses.
+  if ( data->client && data->active ) {
+    jack_deactivate( data->client );
+    data->active = false;
+  }
 
   jack_port_unregister( data->client, data->port );
   data->port = NULL;
