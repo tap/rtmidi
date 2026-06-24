@@ -19,16 +19,18 @@ teardown race (now fixed via a `jack_deactivate`-on-close / reactivate-on-open
 `active` flag, following JACK's documented model; compile-verified, though CI
 runs no JACK server to exercise it at runtime).
 
-**Still open — WinUWP callback lifetime/state race.** The MessageReceived
-handler accesses shared timestamp state without holding `mtx_open_close_`, so it
-can race a concurrent `close()`. Note the handler is already deregistered on
-both `close()` and destruction (`~UWPMidiClass` calls `close()`, which revokes
-the event token), so the lifetime aspect is largely covered; the residual is the
-unsynchronized state access. This backend has **no build path in this project**
-(no local toolchain and no CI job builds `__WINDOWS_UWP__`), so the fix —
-threading changes that risk deadlock — cannot be compile- or runtime-verified
-here and is intentionally left for an environment that can build and exercise
-C++/WinRT rather than shipped blind.
+**WinUWP callback state race — fixed.** The MessageReceived handler updated
+shared timestamp state (`last_time_`, `before_qpc_`, `b_overflow_low_`,
+`firstMessage`) with no synchronization against a concurrent `close()`. A
+dedicated `mtx_in_callback_` now serializes the callback's state access, and an
+`in_closing_` flag (set under that mutex before the handler is revoked) makes a
+callback that races teardown bail before touching any state. A separate mutex
+from `mtx_open_close_` is used deliberately, since `close()` holds the latter
+while calling `in_port_.Close()` and the callback must not contend on it. After
+the WinUWP CI compile job was added, this is compile-verified; the runtime
+concurrency still can't be exercised in CI (no UWP device), so the residual
+in-flight-callback-vs-destruction window inherent to token-based WinRT
+revocation should be confirmed on a real UWP build.
 
 ## Summary
 

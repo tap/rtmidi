@@ -3439,6 +3439,13 @@ public:
     std::mutex mtx_open_close_;
     // Mutex for MIDI IN message queue access
     std::mutex mtx_queue_;
+    // Serializes the MIDI IN callback's access to its shared timestamp state
+    // (last_time_, before_qpc_, ...) against port open/close. A separate mutex
+    // from mtx_open_close_ on purpose: close() holds that one while calling
+    // in_port_.Close(), so the callback must not contend on it. in_closing_
+    // lets a callback that races teardown bail before touching any state.
+    std::mutex mtx_in_callback_;
+    bool in_closing_{ false };
 
 private:
     std::vector<port> list_ports(winrt::hstring device_selector);
@@ -3647,11 +3654,22 @@ void UWPMidiClass::close()
 {
     if (in_port_)
     {
+        // Tell a racing callback to bail, then revoke the handler so no new
+        // ones dispatch, before tearing the port down.
+        {
+            std::lock_guard<std::mutex> cb_lock(mtx_in_callback_);
+            in_closing_ = true;
+        }
         if (before_token_)
             in_port_.MessageReceived(before_token_);
 
         in_port_.Close();
         in_port_ = nullptr;
+
+        {
+            std::lock_guard<std::mutex> cb_lock(mtx_in_callback_);
+            in_closing_ = false;
+        }
     }
     if (out_port_)
     {
@@ -3663,6 +3681,13 @@ void UWPMidiClass::close()
 // MessageReceived event handler
 void UWPMidiClass::midi_in_callback(const MidiInPort&, const MidiMessageReceivedEventArgs& e)
 {
+    // Serialize with open/close and bail if the port is being torn down, so we
+    // never read/update the timestamp state (or input_data_) concurrently with
+    // close()/in_open().
+    std::lock_guard<std::mutex> cb_lock(mtx_in_callback_);
+    if (in_closing_)
+        return;
+
 #ifndef RTMIDI_DO_NOT_ENABLE_WORKAROUND_UWP_WRONG_TIMESTAMPS
     LARGE_INTEGER qpc;
     if (qpc_freq_)
