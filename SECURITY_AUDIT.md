@@ -11,17 +11,24 @@ Fixes have landed in two rounds. **Round 1** (merged via PR #1): the MidiQueue
 data race, the shared input parser + zero-length-event OOB (JACK/Android), the
 queue-sizing crash, the duplicate Web MIDI API entry, and the C-wrapper
 hardening — plus the test suite and CI expansion. **Round 2** (this branch):
-the remaining backend-specific guards below — ALSA free-of-garbage subscription,
-JACK `MidiOutJack::getPortName` OOB, WinMM `sysex->dwUser` bounds, CoreMIDI
-`CFRetain(NULL)` and uninitialized name buffers.
+the remaining backend guards — ALSA free-of-garbage subscription, JACK
+`MidiOutJack::getPortName` OOB, WinMM `sysex->dwUser` bounds, CoreMIDI
+`CFRetain(NULL)` and uninitialized name buffers — followed by the WinMM buffer
+and critical-section leaks (openPort/closePort) and the JACK `closePort`
+teardown race (now fixed via a `jack_deactivate`-on-close / reactivate-on-open
+`active` flag, following JACK's documented model; compile-verified, though CI
+runs no JACK server to exercise it at runtime).
 
-**Still open:** the JACK `closePort` port-handle teardown race. On review the
-destructor is already safe (`jack_client_close` quiesces the realtime callback
-before `delete data`); the residual is a narrow race in `closePort`, and the
-correct fix (deactivate-on-close / reactivate-on-open) alters the hot path for
-all JACK users and cannot be runtime-verified here (CI runs no JACK server), so
-it is deferred rather than shipped unverified. Also open: WinMM `MIDIHDR` /
-critical-section leaks on error paths, and the WinUWP callback-lifetime races.
+**Still open — WinUWP callback lifetime/state race.** The MessageReceived
+handler accesses shared timestamp state without holding `mtx_open_close_`, so it
+can race a concurrent `close()`. Note the handler is already deregistered on
+both `close()` and destruction (`~UWPMidiClass` calls `close()`, which revokes
+the event token), so the lifetime aspect is largely covered; the residual is the
+unsynchronized state access. This backend has **no build path in this project**
+(no local toolchain and no CI job builds `__WINDOWS_UWP__`), so the fix —
+threading changes that risk deadlock — cannot be compile- or runtime-verified
+here and is intentionally left for an environment that can build and exercise
+C++/WinRT rather than shipped blind.
 
 ## Summary
 
