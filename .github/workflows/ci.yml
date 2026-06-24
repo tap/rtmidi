@@ -2,6 +2,10 @@ name: C/C++ CI
 
 on: [push, pull_request]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   Linux:
     runs-on: ubuntu-latest
@@ -15,7 +19,7 @@ jobs:
             APIcmake: ALSA
             deps: libasound-dev
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
       with:
         fetch-depth: 0
     - name: install dependencies
@@ -36,7 +40,7 @@ jobs:
   MacOS:
     runs-on: macOS-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
       with:
         fetch-depth: 0
     - name: install dependencies
@@ -59,7 +63,7 @@ jobs:
           - host: x86_64-w64-mingw32
             api: winmm
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
       with:
         fetch-depth: 0
     - name: install dependencies
@@ -72,3 +76,36 @@ jobs:
         && mkdir bld-automake && cd bld-automake
         && (../configure --host=${{matrix.host}} --with-${{matrix.api}} CPPFLAGS=${{matrix.cppflags}} || (cat config.log; false))
         && make V=1
+
+  Sanitizers:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: asan-ubsan
+            sanitize: address,undefined
+          - name: tsan
+            sanitize: thread
+    name: Sanitizers (${{matrix.name}})
+    env:
+      # Fail the build on any UBSan diagnostic instead of merely printing it.
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+      ASAN_OPTIONS: detect_leaks=1
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: install dependencies
+      run:
+        sudo apt-get update
+        && sudo apt-get install g++ autoconf-archive cmake libasound-dev
+    - name: build and test (ALSA)
+      run:
+        env NOCONFIGURE=1 ./autogen.sh
+        && mkdir bld-sanitize && cd bld-sanitize
+        && (../configure --with-alsa
+            CXXFLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=${{matrix.sanitize}} -fno-sanitize-recover=all"
+            LDFLAGS="-fsanitize=${{matrix.sanitize}}"
+            || (cat config.log; false))
+        && make V=1 && make check
