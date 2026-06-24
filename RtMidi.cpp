@@ -4102,43 +4102,10 @@ static int jackProcessIn( jack_nframes_t nframes, void *arg )
 
     jData->lastTime = time;
 
-    if ( !continueSysex )
-      message.bytes.clear();
-
-    if ( !( ( continueSysex || event.buffer[0] == 0xF0 ) && ( ignoreFlags & 0x01 ) ) ) {
-      // Unless this is a (possibly continued) SysEx message and we're ignoring SysEx,
-      // copy the event buffer into the MIDI message struct.
-      for ( unsigned int i = 0; i < event.size; i++ )
-        message.bytes.push_back( event.buffer[i] );
-    }
-
-    switch ( event.buffer[0] ) {
-      case 0xF0:
-        // Start of a SysEx message
-        continueSysex = event.buffer[event.size - 1] != 0xF7;
-        if ( ignoreFlags & 0x01 ) continue;
-        break;
-      case 0xF1:
-      case 0xF8:
-        // MIDI Time Code or Timing Clock message
-        if ( ignoreFlags & 0x02 ) continue;
-        break;
-      case 0xFE:
-        // Active Sensing message
-        if ( ignoreFlags & 0x04 ) continue;
-        break;
-      default:
-        if ( continueSysex ) {
-          // Continuation of a SysEx message
-          continueSysex = event.buffer[event.size - 1] != 0xF7;
-          if ( ignoreFlags & 0x01 ) continue;
-        }
-        // All other MIDI messages
-    }
-
-    if ( !continueSysex ) {
-      // If not a continuation of a SysEx message,
-      // invoke the user callback function or queue the message.
+    if ( MidiInApi::collectMessage( event.buffer, event.size, ignoreFlags,
+                                    continueSysex, message ) ) {
+      // A complete message is ready: invoke the user callback function or
+      // queue the message.
       if ( rtData->usingCallback ) {
         RtMidiIn::RtMidiCallback callback = (RtMidiIn::RtMidiCallback) rtData->userCallback;
         callback( message.timeStamp, &message.bytes, rtData->userData );
@@ -5193,32 +5160,11 @@ void* MidiInAndroid :: pollMidi(void* context) {
       break;
     }
 
-    switch (incomingMessage[0]) {
-      case 0xF0:
-        // Start of a SysEx message
-        continueSysex = incomingMessage[numBytesReceived - 1] != 0xF7;
-            if (ignoreFlags & 0x01) continue;
-            break;
-      case 0xF1:
-      case 0xF8:
-        // MIDI Time Code or Timing Clock message
-        if (ignoreFlags & 0x02) continue;
-            break;
-      case 0xFE:
-        // Active Sensing message
-        if (ignoreFlags & 0x04) continue;
-            break;
-      default:
-        if (continueSysex) {
-          // Continuation of a SysEx message
-          continueSysex = incomingMessage[numBytesReceived - 1] != 0xF7;
-          if (ignoreFlags & 0x01) continue;
-        }
-            // All other MIDI messages
-    }
-
-    if (numMessagesReceived > 0 && numBytesReceived >= 0) {
-      auto message = self->inputData_.message;
+    if (numMessagesReceived > 0) {
+      // Use a reference (not a copy) so SysEx reassembly state persists
+      // across poll iterations; a copy would discard partially-accumulated
+      // messages and leave inputData_.message untouched.
+      MidiInApi::MidiMessage& message = self->inputData_.message;
 
       if (self->inputData_.firstMessage == true) {
         message.timeStamp = 0.0;
@@ -5228,16 +5174,8 @@ void* MidiInAndroid :: pollMidi(void* context) {
       }
       self->lastTime = (timestamp * 0.000001);
 
-      if (!continueSysex) message.bytes.clear();
-
-      if ( !( ( continueSysex || incomingMessage[0] == 0xF0 ) && ( ignoreFlags & 0x01 ) ) ) {
-        // Unless this is a (possibly continued) SysEx message and we're ignoring SysEx,
-        // copy the event buffer into the MIDI message struct.
-        for (unsigned int i=0; i<numBytesReceived; i++)
-          message.bytes.push_back(incomingMessage[i]);
-      }
-
-      if (!continueSysex) {
+      if ( MidiInApi::collectMessage( incomingMessage, numBytesReceived,
+                                      ignoreFlags, continueSysex, message ) ) {
         if (self->inputData_.usingCallback) {
           auto callback = (RtMidiIn::RtMidiCallback) self->inputData_.userCallback;
           callback(message.timeStamp, &message.bytes, self->inputData_.userData);
