@@ -1,6 +1,6 @@
 
 noinst_PROGRAMS = midiprobe midiout qmidiin cmidiin sysextest midiclock_in midiclock_out	\
-	apinames testcapi queuestress
+	apinames testcapi queuestress midiparse
 
 AM_CXXFLAGS = -Wall -I$(top_srcdir)
 AM_CFLAGS = -Wall -I$(top_srcdir)
@@ -38,7 +38,11 @@ queuestress_CXXFLAGS = $(AM_CXXFLAGS) -pthread
 queuestress_LDADD = $(top_builddir)/librtmidi.la
 queuestress_LDFLAGS = -pthread
 
+# Unit tests for the shared MIDI input message parser.
+midiparse_SOURCES = midiparse.cpp
+midiparse_LDADD = $(top_builddir)/librtmidi.la
+
 EXTRA_DIST = cmidiin.dsp midiout.dsp midiprobe.dsp qmidiin.dsp	\
 	sysextest.dsp RtMidi.dsw
 
-TESTS = apinames queuestress
+TESTS = apinames queuestress midiparse

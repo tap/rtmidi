@@ -618,6 +618,23 @@ class RTMIDI_DLL_PUBLIC MidiInApi : public MidiApi
     unsigned int size( unsigned int *back=0, unsigned int *front=0 );
   };
 
+  //! Process the raw bytes of one received MIDI event.
+  /*!
+    Accumulates \c bytes into \c message and updates the SysEx
+    continuation state \c continueSysex according to \c ignoreFlags
+    (bit 0: SysEx, bit 1: time/clock, bit 2: active sensing).  Returns
+    true when a complete, non-filtered message is ready to be delivered
+    (queued or passed to the user callback), false when the event was
+    filtered out or is an incomplete SysEx awaiting more data.
+
+    This is the shared message-assembly logic used by the input
+    backends.  It is a static member with no MIDI dependencies so it can
+    be unit tested directly, and it tolerates zero-length events.
+  */
+  static bool collectMessage( const unsigned char *bytes, size_t size,
+                              unsigned char ignoreFlags,
+                              bool &continueSysex, MidiMessage &message );
+
   // The RtMidiInData structure is used to pass private class data to
   // the MIDI input handling function or thread.
   struct RtMidiInData {

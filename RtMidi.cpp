@@ -938,6 +938,59 @@ bool MidiInApi::MidiQueue::pop( std::vector<unsigned char> *msg, double* timeSta
   return true;
 }
 
+// Shared MIDI input message assembly, factored out of the per-backend
+// input handlers so the (formerly duplicated) logic lives and is tested in
+// exactly one place.  Returns true when a complete message is ready to be
+// delivered.  Guards against zero-length events, which would otherwise read
+// bytes[size - 1] out of bounds.
+bool MidiInApi::collectMessage( const unsigned char *bytes, size_t size,
+                                unsigned char ignoreFlags,
+                                bool &continueSysex, MidiMessage &message )
+{
+  // A zero-length event carries no status byte: nothing to do, and reading
+  // bytes[0] / bytes[size - 1] would be out of bounds.
+  if ( size == 0 )
+    return false;
+
+  // Start a fresh message unless we are mid-SysEx (in which case we append).
+  if ( !continueSysex )
+    message.bytes.clear();
+
+  // Unless this is a (possibly continued) SysEx message we are ignoring,
+  // copy the event bytes into the message.
+  if ( !( ( continueSysex || bytes[0] == 0xF0 ) && ( ignoreFlags & 0x01 ) ) ) {
+    for ( size_t i = 0; i < size; i++ )
+      message.bytes.push_back( bytes[i] );
+  }
+
+  switch ( bytes[0] ) {
+    case 0xF0:
+      // Start of a SysEx message: it continues unless this chunk ends it.
+      continueSysex = bytes[size - 1] != 0xF7;
+      if ( ignoreFlags & 0x01 ) return false;
+      break;
+    case 0xF1:
+    case 0xF8:
+      // MIDI Time Code or Timing Clock message.
+      if ( ignoreFlags & 0x02 ) return false;
+      break;
+    case 0xFE:
+      // Active Sensing message.
+      if ( ignoreFlags & 0x04 ) return false;
+      break;
+    default:
+      if ( continueSysex ) {
+        // Continuation of a SysEx message.
+        continueSysex = bytes[size - 1] != 0xF7;
+        if ( ignoreFlags & 0x01 ) return false;
+      }
+      // All other MIDI messages fall through and are delivered.
+  }
+
+  // Deliver only once a SysEx is complete (or for any non-SysEx message).
+  return !continueSysex;
+}
+
 //*********************************************************************//
 //  Common MidiOutApi Definitions
 //*********************************************************************//
