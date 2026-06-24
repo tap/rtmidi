@@ -192,3 +192,22 @@ jobs:
       run:
         aarch64-linux-gnu-g++ -std=c++11 -Wall -D__LINUX_ALSA__ -I. -c RtMidi.cpp -o RtMidi-arm64.o
         && aarch64-linux-gnu-g++ -std=c++11 -Wall -D__LINUX_ALSA__ -I. -c rtmidi_c.cpp -o rtmidi_c-arm64.o
+
+  # Universal Windows Platform (C++/WinRT) backend. There is no CMake support
+  # for it, so compile directly with MSVC: locate Visual Studio with vswhere,
+  # generate the C++/WinRT projection headers from the installed Windows SDK
+  # with cppwinrt, then compile the __WINDOWS_UWP__ translation unit
+  # (C++17 + coroutines). Compile-only smoke test.
+  WinUWP:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: compile UWP backend
+      shell: cmd
+      run: |
+        for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set "VSPATH=%%i"
+        call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+        cppwinrt -input sdk -output "%RUNNER_TEMP%\winrt" || exit /b 1
+        cl /nologo /std:c++17 /EHsc /await /permissive- /D__WINDOWS_UWP__ /I. /I"%RUNNER_TEMP%\winrt" /c RtMidi.cpp /Fo"%RUNNER_TEMP%\RtMidi.obj" || exit /b 1
