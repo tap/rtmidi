@@ -109,3 +109,77 @@ jobs:
             LDFLAGS="-fsanitize=${{matrix.sanitize}}"
             || (cat config.log; false))
         && make V=1 && make check
+
+  # Native Windows build with MSVC (the WinMM backend, default on WIN32).
+  # The autotools/MinGW job only cross-compiles; this exercises the real
+  # toolchain that consumes the msw/*.vcxproj and tests/*.vcxproj files.
+  MSVC:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: CMake configure
+      run: cmake -B bld-msvc -DRTMIDI_API_WINMM=ON
+    - name: CMake build
+      run: cmake --build bld-msvc --config Release --verbose
+    - name: Test
+      run: ctest --test-dir bld-msvc -C Release --output-on-failure
+
+  # Web/Emscripten build. The Web MIDI backend has no CMake support, so we
+  # compile the library translation units (and link a sample program) to
+  # WebAssembly directly with em++ -D__WEB_MIDI_API__.
+  WebMIDI:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: install emscripten
+      run: sudo apt-get update && sudo apt-get install -y emscripten
+    - name: compile to WebAssembly
+      run:
+        em++ -std=c++11 -Wall -D__WEB_MIDI_API__ -I. -c RtMidi.cpp -o RtMidi.o
+        && em++ -std=c++11 -Wall -D__WEB_MIDI_API__ -I. -c rtmidi_c.cpp -o rtmidi_c.o
+        && em++ -std=c++11 -D__WEB_MIDI_API__ -I. tests/cmidiin.cpp RtMidi.o -o cmidiin.js
+
+  # Android build of the native library via the NDK CMake toolchain
+  # (the __AMIDI__ backend, which needs API level >= 29 for libamidi).
+  # Builds the canonical RtMidi.cpp, not the vendored copy under android/.
+  Android:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: CMake configure (NDK, arm64-v8a)
+      run:
+        cmake -B bld-android
+        -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake"
+        -DANDROID_ABI=arm64-v8a
+        -DANDROID_PLATFORM=android-31
+        -DRTMIDI_API_AMIDI=ON
+        -DRTMIDI_BUILD_TESTING=OFF
+    - name: CMake build
+      run: cmake --build bld-android --verbose
+
+  # "Embedded" target: a Raspberry Pi / ARM SBC running Linux uses ALSA, so
+  # we cross-compile the library for aarch64-linux-gnu. (A bare-metal board
+  # such as an RP2040 Pico is intentionally NOT covered: RtMidi wraps an OS
+  # MIDI API and has no bare-metal backend, so it would only build the no-op
+  # Dummy API there.) ALSA headers are arch-independent, so this is a
+  # compile-only smoke test that catches ARM-specific issues.
+  CrossARM:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: install cross toolchain
+      run:
+        sudo apt-get update
+        && sudo apt-get install -y g++-aarch64-linux-gnu libasound-dev
+    - name: cross-compile for aarch64 (ALSA)
+      run:
+        aarch64-linux-gnu-g++ -std=c++11 -Wall -D__LINUX_ALSA__ -I. -c RtMidi.cpp -o RtMidi-arm64.o
+        && aarch64-linux-gnu-g++ -std=c++11 -Wall -D__LINUX_ALSA__ -I. -c rtmidi_c.cpp -o rtmidi_c-arm64.o
