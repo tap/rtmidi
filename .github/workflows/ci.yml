@@ -120,7 +120,11 @@ jobs:
       with:
         fetch-depth: 0
     - name: CMake configure
-      run: cmake -B bld-msvc -DRTMIDI_API_WINMM=ON
+      # Build a static library so the test executables link the library
+      # directly. A shared (DLL) build places rtmidi.dll in a different
+      # output directory than the test .exe files, so at runtime Windows
+      # cannot locate the DLL and every test stalls until it times out.
+      run: cmake -B bld-msvc -DRTMIDI_API_WINMM=ON -DBUILD_SHARED_LIBS=OFF
     - name: CMake build
       run: cmake --build bld-msvc --config Release --verbose
     - name: Test
