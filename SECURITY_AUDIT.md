@@ -5,6 +5,33 @@
 **Commit:** `a3233c2`
 **Date:** 2026-06-24
 
+## Resolution status
+
+Fixes have landed in two rounds. **Round 1** (merged via PR #1): the MidiQueue
+data race, the shared input parser + zero-length-event OOB (JACK/Android), the
+queue-sizing crash, the duplicate Web MIDI API entry, and the C-wrapper
+hardening — plus the test suite and CI expansion. **Round 2** (this branch):
+the remaining backend guards — ALSA free-of-garbage subscription, JACK
+`MidiOutJack::getPortName` OOB, WinMM `sysex->dwUser` bounds, CoreMIDI
+`CFRetain(NULL)` and uninitialized name buffers — followed by the WinMM buffer
+and critical-section leaks (openPort/closePort) and the JACK `closePort`
+teardown race (now fixed via a `jack_deactivate`-on-close / reactivate-on-open
+`active` flag, following JACK's documented model; compile-verified, though CI
+runs no JACK server to exercise it at runtime).
+
+**WinUWP callback state race — fixed.** The MessageReceived handler updated
+shared timestamp state (`last_time_`, `before_qpc_`, `b_overflow_low_`,
+`firstMessage`) with no synchronization against a concurrent `close()`. A
+dedicated `mtx_in_callback_` now serializes the callback's state access, and an
+`in_closing_` flag (set under that mutex before the handler is revoked) makes a
+callback that races teardown bail before touching any state. A separate mutex
+from `mtx_open_close_` is used deliberately, since `close()` holds the latter
+while calling `in_port_.Close()` and the callback must not contend on it. After
+the WinUWP CI compile job was added, this is compile-verified; the runtime
+concurrency still can't be exercised in CI (no UWP device), so the residual
+in-flight-callback-vs-destruction window inherent to token-based WinRT
+revocation should be confirmed on a real UWP build.
+
 ## Summary
 
 RtMidi is a mature, widely used realtime MIDI I/O library with a clean public API
